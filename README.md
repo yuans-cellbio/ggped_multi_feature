@@ -1,4 +1,4 @@
-# ggped v2 — Multi-Feature Segmented Pedigree Symbols
+# ggped multi-feature support
 
 > **This is a fork of [moritzlindner/ggped](https://github.com/moritzlindner/ggped)**
 > by [Moritz Lindner](http://lindnerlab.de), extended with multi-feature
@@ -48,7 +48,7 @@ See [NEWS.md](NEWS.md) for the full changelog.
 if (!requireNamespace("remotes", quietly = TRUE)) {
   install.packages("remotes")
 }
-remotes::install_github("[YOUR GITHUB USERNAME]/ggped")
+remotes::install_github("yuans-cellbio/ggped_multi_feature")
 
 # Or install the original upstream package:
 # remotes::install_github("moritzlindner/ggped")
