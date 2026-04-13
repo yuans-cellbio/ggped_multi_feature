@@ -1,370 +1,214 @@
 #' geom_pedigreepoint
 #'
-#' The pedigreepoint geom is used to create the symbols on a pedigree chart representing individuals. Points are shaped by gender, can be marked as deceased and tagged with multiple colours.
+#' The pedigreepoint geom draws pedigree symbols (square for male, circle for
+#' female, diamond for undefined) split into n segments, each independently
+#' filled according to a feature's colour scale.
 #'
 #' @inheritParams ggplot2::geom_point
 #' @name geom_pedigreepoint
 #' @section Aesthetics:
-#' \code{geom_pedigreepoint()} understands the following aesthetics (required aesthetics are in bold - data type is critical for correct plotting):
+#' \code{geom_pedigreepoint()} understands the following aesthetics:
 #' \itemize{
-#'  \item \strong{x} Coordinate. Numeric.
-#'  \item \strong{y} Coordinate. Numeric.
-#'  \item \strong{sex} Gender. Factor. 1 or M is Male, 2 or F is Female
-#'  \item \strong{isdead} Factor or Logical. 0 or FALSE is Alive, 1 or TRUE is Dead. If factor, 2 is Stillbirth or Miscarriage. All others are Unknown.
-#'  \item feature.name Features to plot.
-#'  \item feature.value Corresponding status of feature.
-#'  \item adopted Logical. Depicted as brackets around symbol.
-#'  \item pregnancy Logical. Depicted as P in symbol.
+#'  \item \strong{x} Numeric x coordinate.
+#'  \item \strong{y} Numeric y coordinate.
+#'  \item \strong{sex} Factor. 1/M = Male (square), 2/F = Female (circle), 0/U = Unknown (diamond).
+#'  \item \strong{isdead} Factor or Logical. 0/FALSE = Alive, 1/TRUE = Dead.
+#'  \item \strong{individual_id} Unique individual identifier.
+#'  \item adopted Logical. Brackets around symbol.
+#'  \item pregnancy Logical. P in symbol.
 #'  \item colour Stroke colour. Default: "black".
 #'  \item alpha Symbol alpha. Default: 1.
 #'  \item stroke Stroke thickness.
 #' }
-#' @importFrom ggplot2 ggproto
-#' @importFrom ggplot2 unit
-#' @importFrom grid unit
-#' @importFrom grid polygonGrob
-#' @importFrom grid pointsGrob
-#' @seealso Scales
+#' @importFrom ggplot2 ggproto Geom aes
+#' @importFrom grid unit polygonGrob polylineGrob segmentsGrob pointsGrob
+#'   textGrob gpar gList unit.c
 #' @export
 NULL
+
 GeomPedigreePoint <- ggproto(
-  "GeomPedigreePoint",
-  Geom,
-  required_aes = c("x", "y", "sex", "isdead"),
-  optional_aes = c(
-    "feature.name",
-    "feature.value",
-    "adopted",
-    "pregnancy",
-    "colour",
-    "alpha",
-    "stroke"
-  ),
-  default_aes = aes(
-    feature.name = "#FFFFFF",
-    feature.value = NA,
-    adopted = FALSE,
-    pregnancy = FALSE,
-    sex = 22,
-    colour = "black",
-    alpha = 1,
-    stroke = 1,
-    isdead = 0
-  ),
-  setup_data = function(data, param) {
-    # Check if 'sex' is a factor
-    if (!is.factor(data$sex)) {
-      stop("The 'sex' column must be of class 'factor'.")
+"GeomPedigreePoint",
+ggplot2::Geom,
+required_aes = c("x", "y", "sex", "isdead"),
+optional_aes = c(
+  "individual_id",
+  "adopted",
+  "pregnancy",
+  "colour",
+  "alpha",
+  "stroke"
+),
+default_aes = aes(
+  adopted   = FALSE,
+  pregnancy = FALSE,
+  colour    = "black",
+  alpha     = 1,
+  stroke    = 1,
+  isdead    = 0
+),
+
+# ---- Extra params carried through from the layer ----
+# segment_fills: named list, keyed by individual_id, each a character vector
+#   of n hex colours (one per segment, in segment order)
+# n_features: integer, number of features (= number of segments)
+
+setup_data = function(data, params) {
+  if (!is.factor(data$sex)) {
+    data$sex <- as.factor(data$sex)
+  }
+  if (!is.factor(data$isdead) && !is.logical(data$isdead)) {
+    data$isdead <- as.factor(data$isdead)
+  }
+  data
+},
+
+draw_panel = function(data, panel_scales, coord,
+                      segment_fills = list(),
+                      n_features    = 1L,
+                      size          = 5,
+                      na.colour     = "#808080") {
+
+  coords <- coord$transform(data, panel_scales)
+
+  n_seg <- as.integer(n_features)
+  grob_list <- grid::gList()
+
+  for (i in seq_len(nrow(coords))) {
+    row <- coords[i, ]
+    cx <- grid::unit(row$x, "npc")
+    cy <- grid::unit(row$y, "npc")
+
+    shape <- sex_to_shape(row$sex)
+    seg_polys <- get_segment_polygons(shape, n_seg, scale = 1)
+
+    # Retrieve fill colours for this individual
+    ind_id <- if ("individual_id" %in% names(row)) as.character(row$individual_id) else paste(row$x, row$y)
+    fills <- segment_fills[[ind_id]]
+    if (is.null(fills)) {
+      fills <- rep("#FFFFFF", n_seg)
     }
-    
-    # Check if 'isdead' is either a factor or a logical vector
-    if (!is.factor(data$isdead) && !is.logical(data$isdead)) {
-      stop("The 'isdead' column must be of class 'factor' or 'logical'.")
-    }
-    
-    # Check if 'feature.value' is a logical vector
-    if (!is.logical(data$feature.value)) {
-      stop("The 'feature.value' column must be of class 'logical'.")
-    }
-    data
-  },
-  draw_panel = function(data,
-                        panel_scales,
-                        coord,
-                        feature.colours,
-                        na.colour,
-                        size) {
-    ## Transformations
-    coords <-
-      coord$transform(data[, c("x", "y")], panel_scales)
-    coords$x <- unit(coords$x, "npc")
-    coords$y <- unit(coords$y, "npc")
-    ## Make arc and rect template
-    range <- seq(0, 2 * pi, pi / 100)
-    
-    circh <-
-      split_by_feature(sin(-range),
-                       unique(data$feature.name),
-                       size)
-    circv <-
-      split_by_feature(cos(-range),
-                       unique(data$feature.name),
-                       size)
-    
-    recth <-
-      split_by_feature(c(
-        seq(0,-12.5, by = -0.5),
-        rep(-12.5, 50),
-        seq(-12, 12.5, by =
-              0.5),
-        rep(12.5, 50),
-        seq(12, 0.5, by =
-              -0.5)
-      ) / 12.5,
-      unique(data$feature.name),
-      size)
-    rectv <-
-      split_by_feature(c(
-        rep(12.5, 25),
-        seq(12,-12.5, by =
-              -0.5),
-        rep(-12.5, 50),
-        seq(-12, 12.5, by =
-              0.5),
-        rep(12.5, 25)
-      ) / 12.5,
-      unique(data$feature.name),
-      size)
-    
-    rhombh <-
-      split_by_feature(c(
-        seq(0,-12, by = -0.5),
-        seq(-12.5, 12.5, by =
-              0.5),
-        seq(12, 0.5, by =
-              -0.5)
-      ) / 12.5,
-      unique(data$feature.name),
-      size)
-    rhombv <-
-      split_by_feature(c(seq(-12.5, 12, by = 0.5),
-                         seq(12.5,-12, by =
-                               -0.5)) / 12.5,
-                       unique(data$feature.name),
-                       size)
-    
-    tokeep <-
-      sort(unique(c(as.vector(
-        apply(cbind(recth, rectv), 2, function(x) {
-          c(which.max(x),
-            which.min(x))
-        })
-      ),
-      1,
-      dim(recth)[1])))
-    h = dim(circh)[1]
-    pieid <-
-      rep(1:length(unique(data$feature.name)), each = h)
-    
-    ## Calculate arcs or rects around each midpoint
-    id <- NULL
-    cid <- 0
-    fill <- NULL
-    alpha <- NULL
-    stroke <- NULL
-    colour <- NULL
-    for (i in 1:dim(coords)[1]) {
-      if (i == 1) {
-        if (data$sex[i] == 22) {
-          x <- coords$x[i] + unit(recth[, data$feature.name[i]], "points")
-          y <-
-            coords$y[i] + unit(rectv[, data$feature.name[i]], "points")
-          id <- rep(i, dim(recth)[1])
-        } else{
-          if (data$sex[i] == 0) {
-            x <- coords$x[i] + unit(rhombh[, data$feature.name[i]], "points")
-            y <-
-              coords$y[i] + unit(rhombv[, data$feature.name[i]], "points")
-            id <- rep(i, dim(rhombh)[1])
-          } else{
-            x <- coords$x[i] + unit(circh[, data$feature.name[i]], "points")
-            y <-
-              coords$y[i] + unit(circv[, data$feature.name[i]], "points")
-            id <- rep(i, dim(circh)[1])
-          }
-        }
-      } else{
-        if (data$sex[i] == 22) {
-          x <-
-            unit.c(x, coords$x[i] + unit(recth[, data$feature.name[i]], "points"))
-          y <-
-            unit.c(y, coords$y[i] + unit(rectv[, data$feature.name[i]], "points"))
-          id <-
-            c(id, rep(i, dim(recth)[1]))
-        } else{
-          if (data$sex[i] == 0) {
-            x <-
-              unit.c(x, coords$x[i] + unit(rhombh[, data$feature.name[i]], "points"))
-            y <-
-              unit.c(y, coords$y[i] + unit(rhombv[, data$feature.name[i]], "points"))
-            id <-
-              c(id, rep(i, dim(rhombh)[1]))
-          } else{
-            x <-
-              unit.c(x, coords$x[i] + unit(circh[, data$feature.name[i]], "points"))
-            y <-
-              unit.c(y, coords$y[i] + unit(circv[, data$feature.name[i]], "points"))
-            id <-
-              c(id, rep(i, dim(circh)[1]))
-            
-          }
-        }
-      }
-      # Feature status (Fill)
-      if (is.na(data$feature.value[i])) {
-        fill <- c(fill, na.colour)
-      } else{
-        if (data$feature.value[i]) {
-          fill <- c(fill, data$feature.name[i])
-        } else{
-          fill <- c(fill, "#FFFFFF")
-        }
-      }
-      
-      # Generic point aesthetics
-      alpha <- c(alpha, data$alpha[i])
-      stroke <- c(stroke, data$stroke[i])
-      colour <- c(colour, data$colour[i])
-    }
-    
-    # subset "non-alive"
-    if (any(data$isdead != 0)) {
-      status <- cbind(coords[data$isdead != 0, ],
-                      data[data$isdead != 0, !(colnames(data) %in% c("x", "y"))])
-      status$cex <- 2.25
-    }
-    # subset "adopted"
-    if (any(data$adopted)) {
-      adopted <- cbind(coords[data$adopted, ],
-                       data[data$adopted, !(colnames(data) %in% c("x", "y"))])
-      adopted$cex <- .5
-    }
-    # subset "pregnancy"
-    if (any(data$pregnancy)) {
-      pregnancy <- cbind(coords[data$pregnancy, ],
-                         data[data$pregnancy, !(colnames(data) %in% c("x", "y"))])
-      pregnancy$cex <- .5
-    }
-    
-    offset <- unit(0.5, "points")
-    # Draw
-    obj <- polygonGrob(
-      # subject
-      x = x,
-      y = y,
-      id = id,
-      default.units = "npc",
-      gp = gpar(
-        fill = fill,
-        alpha = alpha,
-        lwd = stroke,
-        col = colour
+
+    # Draw each segment as a polygon
+    for (s in seq_len(n_seg)) {
+      poly_pts <- seg_polys[[s]]
+      n_pts <- nrow(poly_pts)
+
+      px <- cx + grid::unit(poly_pts[, 1] * size, "points")
+      py <- cy + grid::unit(poly_pts[, 2] * size, "points")
+
+      seg_grob <- grid::polygonGrob(
+        x  = px,
+        y  = py,
+        gp = grid::gpar(
+          fill = fills[s],
+          col  = row$colour,
+          alpha = row$alpha,
+          lwd  = row$stroke
+        )
       )
-    )
-    
-    if (any(data$isdead != 0)) {
-      obj <- gList(
-        obj,
-        pointsGrob(
-          x = status$x,
-          y = status$y,
-          size = unit(7, "char"),
-          gp = gpar(
-            cex = status$cex,
-            alpha = status$alpha,
-            lwd = status$stroke,
-            col = status$colour
-          ),
-          pch = status$isdead
+      grob_list <- grid::gList(grob_list, seg_grob)
+    }
+
+    # Overlay: deceased
+    if (!is.null(row$isdead) && as.character(row$isdead) %in% c("1", "TRUE")) {
+      # Diagonal slash through symbol
+      slash_size <- size * 1.3
+      grob_list <- grid::gList(grob_list,
+        grid::segmentsGrob(
+          x0 = cx - grid::unit(slash_size, "points"),
+          y0 = cy - grid::unit(slash_size, "points"),
+          x1 = cx + grid::unit(slash_size, "points"),
+          y1 = cy + grid::unit(slash_size, "points"),
+          gp = grid::gpar(col = row$colour, lwd = row$stroke * 1.5)
         )
       )
     }
-    
-    if (any(data$pregnancy)) {
-      obj <- gList(obj,
-                   pointsGrob(
-                     x = pregnancy$x,
-                     y = pregnancy$y,
-                     size = unit(7, "char"),
-                     gp = gpar(
-                       cex = pregnancy$cex,
-                       alpha = pregnancy$alpha,
-                       lwd = pregnancy$stroke,
-                       col = pregnancy$colour
-                     ),
-                     pch = 65
-                   ))
-    }
-    
-    if (any(data$adopted)) {
-      obj <- gList(obj,
-                   # pointsGrob(
-                   #   x = adopted$x,
-                   #   y = adopted$y,
-                   #   size = unit(7, "char"),
-                   #   gp =gpar(cex=adopted$cex,alpha=adopted$alpha,
-                   #            lwd=adopted$stroke, col=adopted$colour),
-                   #   pch=80)
-                   textGrob(
-                     "[  ]",
-                     x = adopted$x,
-                     y = adopted$y,
-                     vjust = 0.4,
-                     gp = gpar(
-                       cex = adopted$cex * 2.75,
-                       alpha = adopted$alpha,
-                       lwd = adopted$stroke,
-                       col = adopted$colour
-                     )
-                   ))
-    }
-    obj
-  },
-  draw_key = function (data, params, size)  {
-    if (data$isdead == 0) {
-      shape <- data$sex
-    } else{
-      shape <- data$isdead
-    }
-    pointsGrob(
-      0.5,
-      0.5,
-      pch = shape,
-      gp = grid::gpar(
-        fill = data$feature.name,
-        alpha = data$alpha,
-        lwd = data$stroke,
-        col = data$colour
+
+    # Overlay: adopted (brackets)
+    if (!is.null(row$adopted) && isTRUE(as.logical(row$adopted))) {
+      grob_list <- grid::gList(grob_list,
+        grid::textGrob(
+          "[  ]",
+          x  = cx,
+          y  = cy,
+          vjust = 0.4,
+          gp = grid::gpar(
+            cex   = 1.5,
+            alpha = row$alpha,
+            col   = row$colour
+          )
+        )
       )
-    )
+    }
+
+    # Overlay: pregnancy
+    if (!is.null(row$pregnancy) && isTRUE(as.logical(row$pregnancy))) {
+      grob_list <- grid::gList(grob_list,
+        grid::textGrob(
+          "P",
+          x  = cx,
+          y  = cy,
+          vjust = 0.5,
+          gp = grid::gpar(
+            cex   = 0.8,
+            alpha = row$alpha,
+            col   = row$colour
+          )
+        )
+      )
+    }
   }
+
+  grob_list
+},
+
+draw_key = function(data, params, size) {
+  grid::pointsGrob(
+    0.5, 0.5,
+    pch = 22,
+    gp  = grid::gpar(
+      fill  = "#CCCCCC",
+      col   = data$colour,
+      alpha = data$alpha
+    )
+  )
+}
 )
 
-#' @describeIn geom_pedigreepoint geom_pedigreepoint
-#' @param na.colour \strong{Colour to fill symbols with if feature is \code{NA}}.
-#' @param size \strong{Symbol size}.
+#' @describeIn geom_pedigreepoint Create a pedigree point layer
+#' @param segment_fills Named list of fill colour vectors per individual.
+#' @param n_features Integer, number of features (segments).
+#' @param na.colour Colour for NA features.
+#' @param size Symbol size in grid points.
 #' @importFrom ggplot2 layer
-#' @examples
-#' tmp<-data.frame(x=c(1,1,2),y=c(1,2,1),sex=as.factor(c(1,2,1)),status=as.factor(c(2,1,1)),feature.name=as.factor(c("test","test","test")),feature.value=c(TRUE,FALSE,TRUE))
-#' ggplot()+
-#'   geom_pedigreepoint(tmp,aes(x=x,y=y,sex=sex, isdead=status, feature.name=feature.name, feature.value=feature.value),
-#'                        size=7,
-#'                        na.colour="#808080")
 #' @export
-geom_pedigreepoint <-
-  function(data = NULL,
-           mapping = NULL,
-           stat = "identity",
-           position = "identity",
-           ... ,
-           na.rm = FALSE,
-           na.colour = "#080808",
-           size = 5,
-           show.legend = NA,
-           inherit.aes = TRUE) {
-    layer(
-      data = data,
-      mapping = mapping,
-      stat = stat,
-      geom = GeomPedigreePoint,
-      position = position,
-      show.legend = show.legend,
-      inherit.aes = inherit.aes,
-      params = list(
-        na.rm = na.rm,
-        na.colour = na.colour,
-        size = size,
-        ...
-      )
+geom_pedigreepoint <- function(data = NULL,
+                               mapping = NULL,
+                               stat = "identity",
+                               position = "identity",
+                               ...,
+                               na.rm = FALSE,
+                               na.colour = "#808080",
+                               size = 5,
+                               segment_fills = list(),
+                               n_features = 1L,
+                               show.legend = NA,
+                               inherit.aes = TRUE) {
+  ggplot2::layer(
+    data        = data,
+    mapping     = mapping,
+    stat        = stat,
+    geom        = GeomPedigreePoint,
+    position    = position,
+    show.legend = show.legend,
+    inherit.aes = inherit.aes,
+    params      = list(
+      na.rm          = na.rm,
+      na.colour      = na.colour,
+      size           = size,
+      segment_fills  = segment_fills,
+      n_features     = n_features,
+      ...
     )
-  }
+  )
+}

@@ -1,2 +1,8 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+^\.git$
+^\.gitignore$
+^inst/test_example\.R$
+^segmentation\.py$
+^test_visual\.py$
+^.*\.png$
