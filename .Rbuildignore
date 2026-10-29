@@ -6,3 +6,10 @@
 ^segmentation\.py$
 ^test_visual\.py$
 ^.*\.png$
+^tools$
+^validation$
+^REFACTOR_PLAN\.md$
+^ggped_.*\.tar\.gz$
+^ggped\.Rcheck$
+^Rplots\.pdf$
+^LICENSE$

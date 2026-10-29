@@ -7,3 +7,8 @@
 *.dll
 __pycache__/
 *.pyc
+validation/
+ggped_*.tar.gz
+ggped.Rcheck/
+Rplots.pdf
+REFACTOR_PLAN.md

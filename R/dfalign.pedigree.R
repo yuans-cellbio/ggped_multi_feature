@@ -1,285 +1,76 @@
-#' dfalign.pedigree
+#' Align a pedigree and retain its explicit relationships
 #'
-#' Calculate pedigree drawing coordinates and join them with pedigree data.
-#'
-#' This function calculates pedigree drawing coordinates using the \code{\link[kinship2]{align.pedigree}} function and combines them with the provided pedigree data. The resulting data frame can be used to plot pedigrees with \code{\link{ggplot2}} or specific pedigree plotting functions like \code{\link{ggdraw.pedigree}}.
-#'
-#' @inheritParams kinship2::align.pedigree
-#' @inheritParams kinship2::kinship
-#' @importFrom kinship2 align.pedigree
-#' @importFrom cli cli_abort cli_alert_info
-#' @return A \code{data.frame} containing pedigree drawing coordinates and data with the following columns:
-#' \describe{
-#'   \item{ID}{The numeric ID of each subject.}
-#'   \item{Name}{The name of each subject.}
-#'   \item{family}{The numeric ID of each family.}
-#'   \item{mate.id}{The numeric ID of each mating.}
-#'   \item{mate.helper}{Numeric. Information about the mating.}
-#'   \item{mate.type}{Factor. 1 = subject plotted to the immediate right is a spouse, 2 = subject plotted to the immediate right is an inbred spouse, 0 = not a spouse.}
-#'   \item{twin.id}{The numeric ID of each twin pair.}
-#'   \item{twin.type}{Numeric. Information about the twin pair.}
-#'   \item{dad.id, mom.id}{Identification variables for father and mother. Founders' parents should be coded as NA.}
-#'   \item{sex}{Gender of the individual noted in 'id'. Either character ("male","female","Male","Female","M","F") or numeric (1="male", 2="female") data is understood by downstream function \code{\link{ggdraw.pedigree}}.}
-#'   \item{status}{Numeric. Life status: 0=alive/missing, 1=dead, 2=stillbirth, 3=miscarriage.}
-#'   \item{x, y}{Drawing coordinates of each subject.}
-#'   \item{mate.centerpoint, family.centerpoint, twin.centerpoint}{Centerpoints for mating, offspring, and twins, respectively, for drawing the tree.}
-#'   \item{kinship}{Numeric. Kinship between mating individuals as calculated by the \code{\link{kinship}} function.}
-#'   \item{...}{Further columns of type logical, containing affected indicators.}
-#' }
-#' Each row represents one subject
-#' @examples
-#' data(minnbreast)
-#' bpeds <- with(minnbreast, pedigree(id, fatherid, motherid, sex, affected=proband, famid=famid))
-#' bped.id8 <- bpeds['8']
-#' df<-dfalign.pedigree(bped.id8)
-#' @seealso \link[kinship2]{kinship}, \link[kinship2]{align.pedigree}, \link{ggdraw.pedigree}
+#' Uses kinship2 for initial coordinates. A person can have several drawing
+#' occurrences. Parentage is retained separately from per-row family columns.
+#' @param ped A single kinship2 pedigree.
+#' @param chrtype Chromosome type passed to kinship2::kinship.
+#' @param packed,width,align,hints Arguments passed to kinship2::align.pedigree.
+#' @return A data frame with legacy drawing columns, stable `person_id` and
+#'   `occurrence_id` columns, and a `ggped_relationships` attribute.
 #' @export
-dfalign.pedigree <-
-  function(ped,
-           chrtype = "autosome",
-           packed = TRUE,
-           width = 10,
-           align = TRUE,
-           hints = ped$hints) {
-    
-    if (!requireNamespace("kinship2", quietly = TRUE)) {
-      cli::cli_abort("The 'kinship2' package is required but not installed. Please install it using: install.packages('kinship2')")
-    }
-    
-    # Validate 'ped' parameter
-    if (!(class(ped) %in% c("pedigree"))) {
-      cli::cli_abort("Input 'ped' must be of class 'pedigree'. Provided class: {.val {class(ped)}}")
-    }
-    
-    # Validate 'chrtype' parameter
-    if (!is.character(chrtype) || !chrtype %in% c("autosome", "x", "y", "mt")) {
-      cli::cli_abort("Parameter 'chrtype' must be one of 'autosome', 'x', 'y', or 'mt'. Provided value: {.val {chrtype}}")
-    }
-    
-    # Validate 'packed' parameter
-    if (!is.logical(packed)) {
-      cli::cli_abort("Parameter 'packed' must be a logical value (TRUE or FALSE). Provided type: {.val {class(packed)}}")
-    }
-    
-    # Validate 'width' parameter
-    if (!is.numeric(width) || width <= 0) {
-      cli::cli_abort("Parameter 'width' must be a positive numeric value. Provided value: {.val {width}} of type {.val {class(width)}}")
-    }
-    
-    # Validate 'align' parameter
-    if (!is.logical(align)) {
-      cli::cli_abort("Parameter 'align' must be a logical value (TRUE or FALSE). Provided type: {.val {class(align)}}")
-    }
-    
-    # Validate 'hints' parameter
-    if (!is.null(hints) && !is.list(hints)) {
-      cli::cli_abort("Parameter 'hints' must be a list or NULL. Provided type: {.val {class(hints)}}")
-    }
-    
-    # Check if 'ped' has at least one entry
-    if (nrow(as.data.frame(ped)) < 1) {
-      cli::cli_abort("Input 'ped' must have at least one entry. The provided pedigree has {.val {nrow(as.data.frame(ped))}} entries.")
-    }
-    
-    struct <-
-      align.pedigree(
-        ped,
-        packed = packed,
-        width = width,
-        align = align,
-        hints = hints
-      )
-    
-    ckall <-
-      ped$id[is.na(match(ped$id, ped$id[struct$nid[struct$nid != 0]]))]
-    if (length(ckall > 0)) {
-      cli::cli_alert_info(
-        "Did not include the following subject(s): {.val {paste(ckall, collapse = ', ')}}. Reason: No evidence for relation to other subjects in the tree."
-      )
-    }
-    
-    nvalid <-
-      length(struct$nid[struct$nid != 0])
-    out <- data.frame(
-      ID = numeric(nvalid),
-      Name = numeric(nvalid),
-      family = numeric(nvalid),
-      mate.id = numeric(nvalid),
-      mate.helper = numeric(nvalid),
-      mate.type = numeric(nvalid),
-      twin.id = numeric(nvalid),
-      twin.type = numeric(nvalid),
-      dad.id = numeric(nvalid),
-      mom.id = numeric(nvalid),
-      sex = numeric(nvalid),
-      status = numeric(nvalid),
-      y = numeric(nvalid),
-      x = numeric(nvalid),
-      mate.centerpoint = numeric(nvalid),
-      family.centerpoint = numeric(nvalid),
-      twin.centerpoint = numeric(nvalid),
-      kinship = numeric(nvalid),
-      stringsAsFactors = T
-    )
-    
-    ks <- kinship(ped, chrtype)
-    n = 1 # count up subjects
-    mate.id = 1 # count up matings
-    twin.id = 1 # count up twin pairs
-    make.fam.unique <- 0
-    for (i in 1:length(struct$n)) {
-      #for every row of the pedigree
-      for (j in 1:struct$n[i]) {
-        # do for each subject of that row
-        out$ID[n] <- struct$nid[i, j]
-        out$Name[n] <- ped$id[out$ID[n]]
-        out$sex[n] <- ped$sex[out$ID[n]]
-        out$dad.id[n] <- ped$findex[out$ID[n]]
-        out$mom.id[n] <- ped$mindex[out$ID[n]]
-        out$status[n] <-
-          if (length(ped$status[out$ID[n]]) > 0) {
-            # life status, set to life=0 if not present
-            ped$status[out$ID[n]]
-          } else{
-            0
-          }
-        if (!is.null(ped$affected)) {
-          # affected status, if not given make one column labeling all as unaffected
-          if (is.vector(ped$affected)) {
-            out[n, "affected"] <- ped$affected[out$ID[n]]
-          }
-          if (is.matrix(ped$affected)) {
-            out[n, colnames(ped$affected)] <- ped$affected[out$ID[n],]
-          }
-        } else{
-          out[n, "affected"] <- F
-        }
-        out$y[n] <- i
-        out$x[n] <- struct$pos[i, j]
-        if (struct$fam[i, j] > 0) {
-          # unique family identifier, necessary as align.ped seems to ambiguously name families among generations
-          out$family[n] <- struct$fam[i, j] + make.fam.unique
-        } else{
-          out$family[n] <- struct$fam[i, j]
-        }
-        out$mate.type[n] <- struct$spouse[i, j]
-        if (n > 1 && (out$mate.type[n - 1] > 0)) {
-          # mating info
-          if (length(out$mate.id[n - 2]) != 0 &&
-              !is.na(out$mate.id[n - 2]) &&
-              !is.na(out$mate.id[n - 1])) {
-            # mating w more than one neigbour can only occur after the second plotted subject
-            if (out$mate.id[n - 1] == out$mate.id[n - 2]) {
-              # special case: individual participates/d in more than one mating
-              out$mate.id[n - 1] <- mate.id - 1
-              out$mate.id[n] <- mate.id - 0.5
-              out$mate.helper[n - 1] <- out$mate.type[n - 1]
-              out$mate.helper[n] <- out$mate.type[n - 1]
-            } else{
-              out$mate.id[n - 1] <- mate.id
-              out$mate.id[n] <- mate.id
-              out$mate.helper[n - 1] <- out$mate.type[n - 1]
-              out$mate.helper[n] <- out$mate.type[n - 1]
-            }
-          } else{
-            out$mate.id[n - 1] <- mate.id
-            out$mate.id[n] <- mate.id
-            out$mate.helper[n - 1] <- out$mate.type[n - 1]
-            out$mate.helper[n] <- out$mate.type[n - 1]
-          }
-          out$mate.centerpoint[n - 1] <-
-            mean(c(out$x[n], out$x[n - 1]))
-          out$mate.centerpoint[n] <- NA
-          out$kinship[n - 1] <-
-            ks[as.character(out$Name[n - 1]), as.character(out$Name[n])]
-          mate.id <- mate.id + 1
-        } else{
-          out$mate.id[n] <- NA
-          out$mate.helper[n] <- NA
-          out$mate.centerpoint[n] <- NA
-        }
-        
-        if ("twins" %in% names(struct)) {
-          out$twins[n] <- struct$twins[i, j]
-          if (n > 1 && (out$twins[n - 1] > 0)) {
-            # twin info
-            if (length(out$twin.id[n - 2]) != 0 &&
-                !is.na(out$twin.id[n - 2]) &&
-                !is.na(out$twin.id[n - 1])) {
-              
-            }
-            
-            if (length(out$twin.id[n - 2]) != 0 &&
-                !is.na(out$twin.id[n - 2]) &&
-                !is.na(out$twin.id[n - 1])) {
-              # mating w more than one neighbor can only occur after the second plotted subject
-              if (out$twin.id[n - 1] == out$twin.id[n - 2]) {
-                # special case: individual participates/d in more than one mating
-                out$twin.id[n - 1] <- twin.id - 1
-                out$twin.id[n] <- twin.id - 0.5
-                out$twin.type[n - 1] <- out$twins[n - 1]
-                out$twin.type[n] <- out$twins[n - 1]
-              } else{
-                out$twin.id[n - 1] <- twin.id
-                out$twin.id[n] <- twin.id
-                out$twin.type[n - 1] <- out$twins[n - 1]
-                out$twin.type[n] <- out$twins[n - 1]
-              }
-            } else{
-              out$twin.id[n - 1] <- twin.id
-              out$twin.id[n] <- twin.id
-              out$twin.type[n - 1] <- out$twins[n - 1]
-              out$twin.type[n] <- out$twins[n - 1]
-            }
-            out$twin.centerpoint[n - 1] <-
-              mean(c(out$x[n], out$x[n - 1]))
-            out$twin.centerpoint[n] <- out$twin.centerpoint[n - 1]
-            out$kinship[n - 1] <-
-              ks[as.character(out$Name[n - 1]), as.character(out$Name[n])]
-            twin.id <- twin.id + 1
-          } else{
-            out$twin.id[n] <- NA
-            out$twin.type[n] <- NA
-            out$twin.centerpoint[n] <- NA
-          }
-        } else{
-          out$twin.id[n] <- NA
-          out$twin.type[n] <- NA
-          out$twin.centerpoint[n] <- NA
-        }
-        
-        if (out$kinship[n - 1] == 0 && !is.na(out$mate.helper[n])) {
-          out$kinship[n - 1] <- out$mate.helper[n] - 1
-        }
-        n = n + 1
-      }
-      make.fam.unique <- make.fam.unique + max(struct$fam[i,])
-    }
-    
-    if (is.vector(ped$affected)) {
-      out$affected <- as.logical(out$affected)
-    } else{
-      for (i in colnames(ped$affected)) {
-        out[, i] <- as.logical(out[, i])
-      }
-    }
-    
-    out$mate.type <- as.factor(out$mate.type)
-    out$mate.helper <- NULL#as.factor(out$mate.helper)
-    out$family <- as.factor(out$family)
-    out$sex <- as.factor(out$sex)
-    out$status <- as.factor(out$status)
-    
-    for (i in levels(out$family)) {
-      # make centre points of families
-      out$family.centerpoint[out$ID %in% c(unique(out$mom.id[out$family == i]), unique(out$dad.id[out$family ==
-                                                                                                  i]))] <-
-        mean(out$x[out$family == i], na.rm = T)
-    }
-    
-    #print(out$ID!=0 & out$family!=0 & out$mate.id!=0)
-    out$family[out$family == 0] <- NA
-    out$twin.type<-as.factor(out$twin.type)
-    out
-    
+#' @examples
+#' ped <- kinship2::pedigree(1:3, c(0, 0, 1), c(0, 0, 2), c(1, 2, 1))
+#' dfalign.pedigree(ped)
+dfalign.pedigree <- function(ped, chrtype = "autosome", packed = TRUE,
+                             width = 10, align = TRUE, hints = ped$hints) {
+  if (!inherits(ped, "pedigree")) cli::cli_abort("'ped' must be a single kinship2 pedigree.")
+  chrtype <- tolower(chrtype)
+  if (length(chrtype) != 1L || is.na(chrtype) || !chrtype %in% c("autosome", "x", "y", "mt"))
+    cli::cli_abort("'chrtype' must be autosome, x, y, or mt.")
+  .check_flag(packed, "packed"); .check_flag(align, "align"); .check_positive(width, "width")
+  if (!is.null(hints) && !is.list(hints)) cli::cli_abort("'hints' must be a list or NULL.")
+  if (!length(ped$id)) cli::cli_abort("'ped' must contain individuals.")
+  s <- kinship2::align.pedigree(ped, packed = packed, width = width, align = align, hints = hints)
+  cells <- which(s$nid > 0, arr.ind = TRUE)
+  cells <- cells[order(cells[, 1], cells[, 2]), , drop = FALSE]
+  ids <- s$nid[cells]; n <- length(ids)
+  d <- data.frame(ID = ids, Name = as.character(ped$id[ids]),
+    family = ifelse(s$fam[cells] > 0, paste(cells[, 1], s$fam[cells], sep = ":"), NA),
+    mate.id = NA_real_, mate.type = factor(s$spouse[cells]), twin.id = NA_real_, twin.type = NA_real_,
+    dad.id = ped$findex[ids], mom.id = ped$mindex[ids], sex = ped$sex[ids],
+    status = if (is.null(ped$status)) rep(0, n) else ped$status[ids], x = s$pos[cells], y = cells[, 1],
+    mate.centerpoint = NA_real_, family.centerpoint = NA_real_, twin.centerpoint = NA_real_, kinship = 0,
+    person_id = as.character(ped$id[ids]), stringsAsFactors = FALSE)
+  if (is.null(ped$affected)) d$affected <- FALSE
+  else if (is.matrix(ped$affected)) {
+    a <- ped$affected[ids, , drop = FALSE]
+    if (is.null(colnames(a))) colnames(a) <- paste0("affected", seq_len(ncol(a)))
+    for (nm in colnames(a)) d[[nm]] <- as.logical(a[, nm])
+  } else d$affected <- as.logical(ped$affected[ids])
+  people <- data.frame(person_id = as.character(ped$id), ID = seq_along(ped$id),
+    dad = ifelse(ped$findex > 0, as.character(ped$id[pmax(1L, ped$findex)]), NA_character_),
+    mom = ifelse(ped$mindex > 0, as.character(ped$id[pmax(1L, ped$mindex)]), NA_character_))
+  pairs <- unique(people[!is.na(people$dad), c("dad", "mom")]); names(pairs) <- c("parent1", "parent2")
+  twins <- data.frame(person1 = character(), person2 = character(), code = integer())
+  if (!is.null(ped$relation)) {
+    r <- ped$relation; code <- as.integer(r$code)
+    if (any(code == 4L)) pairs <- unique(rbind(pairs, data.frame(parent1 = as.character(ped$id[r$indx1[code == 4L]]), parent2 = as.character(ped$id[r$indx2[code == 4L]]))))
+    if (any(code < 4L)) twins <- data.frame(person1 = as.character(ped$id[r$indx1[code < 4L]]), person2 = as.character(ped$id[r$indx2[code < 4L]]), code = code[code < 4L])
   }
+  if (!is.null(hints$spouse)) pairs <- unique(rbind(pairs, data.frame(parent1 = as.character(ped$id[hints$spouse[, 1]]), parent2 = as.character(ped$id[hints$spouse[, 2]]))))
+  pairs$relationship_id <- .pair_id(pairs$parent1, pairs$parent2)
+  pairs <- pairs[!duplicated(pairs$relationship_id), , drop = FALSE]
+  ks <- kinship2::kinship(ped, chrtype)
+  pairs$kinship <- vapply(seq_len(nrow(pairs)), function(i) ks[match(pairs$parent1[i], ped$id), match(pairs$parent2[i], ped$id)], numeric(1))
+  d <- .adjacent_partners(d, pairs)
+  d$occurrence_id <- .occurrence_ids(d$person_id)
+  attr(d, "ggped_relationships") <- list(people = people, partnerships = pairs, twins = twins)
+  model <- .relationship_model(d)
+  for (i in seq_len(nrow(model$partnerships))) {
+    p <- model$partnerships[i, ]; rows <- match(c(p$occurrence1, p$occurrence2), d$occurrence_id)
+    d$mate.id[rows] <- i; d$mate.centerpoint[rows[1]] <- p$x; d$kinship[rows[1]] <- p$kinship
+  }
+  for (i in seq_len(nrow(model$families))) {
+    f <- model$families[i, ]; cr <- match(model$children$occurrence_id[model$children$family_id == f$family_id], d$occurrence_id)
+    d$family[cr] <- f$family_id
+    pr <- match(c(f$occurrence1, f$occurrence2), d$occurrence_id); d$family.centerpoint[pr] <- f$target_x
+  }
+  for (i in seq_len(nrow(model$twin_members))) {
+    t <- model$twin_members[i, ]; row <- match(t$occurrence_id, d$occurrence_id)
+    d$twin.id[row] <- match(t$twin_id, unique(model$twin_members$twin_id)); d$twin.type[row] <- t$code; d$twin.centerpoint[row] <- t$apex_x
+  }
+  d$family <- factor(d$family); d$status <- factor(d$status); d$twin.type <- factor(d$twin.type)
+  omitted <- setdiff(as.character(ped$id), d$person_id)
+  if (length(omitted)) cli::cli_alert_info("No connected layout for subject(s): {paste(omitted, collapse = ', ')}.")
+  d
+}

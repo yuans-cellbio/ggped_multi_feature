@@ -23,8 +23,24 @@
 #' @param width Minimum width for packed layout.
 #' @param allow.repeated Allow individuals plotted multiple times?
 #' @param size Symbol size in grid points (default 7).
+#' @param debug Show relationship IDs, drawing occurrences, and anchors.
+#' @param label.mode Use legacy offsets (default) or measured automatic placement.
+#' @param label.control Named list: size and min.size in points; family, fontface;
+#'   gap in inches; wrap in characters; stagger (number of extra rows);
+#'   shrink (FALSE by default). Unresolved constraints are reported, and all
+#'   requested labels remain in the drawing.
+#' @param label.overrides Data frame with label_id and optional x, y, dx, dy.
+#'   x/y are drawing coordinates (negative generations); dx/dy are inch offsets.
+#'   Label IDs are available in plot$diagnostics$labels after drawing.
+#' @param auto.size Opt in to automatic export sizing. Interactive printing always
+#'   uses the current graphics device dimensions.
+#' @param size.control Named list: min.width, min.height, max.width, max.height,
+#'   x.spacing, y.spacing, margin (inches), and max.iter (1 to 10).
 #' @param ... Further arguments passed to \code{\link{geom_pedigreepoint}}.
-#' @return A ggplot object.
+#' @return A ggped_plot containing a ggplot in `plot`, relationship and connection
+#'   tables, recommended_dimensions (inches), options, and a diagnostics
+#'   environment updated on each print or save. The environment contains labels,
+#'   collisions, device size, and export dimensions when applicable.
 #' @import ggplot2
 #' @importFrom grid unit
 #' @importFrom cli cli_abort cli_warn
@@ -66,11 +82,28 @@ ggdraw.pedigree <- function(dat = NULL,
                             width = 10,
                             allow.repeated = FALSE,
                             size = 7,
+                            debug = FALSE,
+                            label.mode = c("legacy", "auto"),
+                            label.control = list(),
+                            label.overrides = NULL,
+                            auto.size = FALSE,
+                            size.control = list(),
                             ...) {
   # ---- Input validation ----
   if (is.null(dat)) cli::cli_abort("Input data 'dat' cannot be NULL.")
   if (length(features) == 0) cli::cli_abort("'features' must contain at least one feature specification.")
   if (length(features) > 4) cli::cli_abort("Maximum 4 features supported (got {length(features)}).")
+  if (is.null(names(features)) || anyNA(names(features)) || any(!nzchar(names(features))) || anyDuplicated(names(features)))
+    cli::cli_abort("'features' must have unique, nonempty names.")
+  if (!all(vapply(features, function(s) inherits(s, c("scale_feature_continuous", "scale_feature_discrete")), logical(1))))
+    cli::cli_abort("Every feature must use scale_feature_continuous() or scale_feature_discrete().")
+  .check_positive(size, "size")
+  .check_flag(plot.names, "plot.names"); .check_flag(plot.kinship.label, "plot.kinship.label")
+  .check_flag(allow.repeated, "allow.repeated"); .check_flag(debug, "debug")
+  label.mode <- match.arg(label.mode)
+  label.control <- .label_options(label.control)
+  .check_flag(auto.size, "auto.size")
+  size.control <- .size_options(size.control)
 
   # Convert pedigree object if needed
   if (inherits(dat, "pedigree")) {
@@ -124,177 +157,36 @@ ggdraw.pedigree <- function(dat = NULL,
       dat[[nm]] <- FALSE
     }
   }
+  for (nm in c("adopted", "pregnancy")) if (!nm %in% names(dat)) dat[[nm]] <- FALSE
+  if (!"status" %in% names(dat)) dat$status <- 0
+  if (anyNA(dat$adopted) || anyNA(dat$pregnancy)) cli::cli_abort("'adopted' and 'pregnancy' cannot contain missing values.")
 
-  # Flip y for top-down rendering
-  dat$y <- -dat$y
-
-  # ---- Robust per-mating descent target computation ----
-  # The original dfalign.pedigree sets family.centerpoint per INDIVIDUAL,
-  # which breaks when a parent has multiple mates: the last family processed
-  # overwrites the centerpoint, so descent lines point to the wrong litter.
-  #
-  # Fix: compute a descent target per MATING by finding the specific children
-  # whose dad.id AND mom.id match the two parents in each mating pair.
-  dat$descent.target.x <- dat$family.centerpoint  # start with original
-
-  if ("dad.id" %in% colnames(dat) && "mom.id" %in% colnames(dat)) {
-    mate_ids <- unique(dat$mate.id[!is.na(dat$mate.id) & !is.na(dat$mate.centerpoint)])
-    for (mid in mate_ids) {
-      mate_rows <- which(dat$mate.id == mid)
-      if (length(mate_rows) < 2) next
-
-      # The two parents in this mating
-      parent_internal_ids <- dat$ID[mate_rows]
-
-      # Find children whose dad.id AND mom.id are BOTH in this parent pair
-      child_rows <- which(
-        dat$dad.id %in% parent_internal_ids &
-        dat$mom.id %in% parent_internal_ids
-      )
-
-      if (length(child_rows) == 0) {
-        # Fallback: find children where EITHER parent matches
-        child_rows <- which(
-          dat$dad.id %in% parent_internal_ids |
-          dat$mom.id %in% parent_internal_ids
-        )
-        # Further filter: children should be one generation below
-        if (length(child_rows) > 0) {
-          parent_y <- dat$y[mate_rows[1]]
-          child_rows <- child_rows[dat$y[child_rows] < parent_y - 0.1]
-        }
-      }
-
-      if (length(child_rows) > 0) {
-        target_x <- mean(dat$x[child_rows], na.rm = TRUE)
-        # Set on the row that has mate.centerpoint (first spouse)
-        cp_rows <- mate_rows[!is.na(dat$mate.centerpoint[mate_rows])]
-        if (length(cp_rows) > 0) {
-          dat$descent.target.x[cp_rows[1]] <- target_x
-        }
-      }
-    }
+  model <- .relationship_model(dat)
+  dat <- model$occurrences
+  if (anyDuplicated(dat$person_id) && !allow.repeated) {
+    cli::cli_abort("This layout repeats individuals. Set 'allow.repeated = TRUE'.")
   }
-
+  dat$individual_id <- dat$occurrence_id
+  names(segment_fills) <- dat$individual_id
+  segments <- .connection_segments(model)
+  segments$y <- -segments$y
+  segments$yend <- -segments$yend
+  segments$colour <- ifelse(segments$kind == "repeated", col.double, col.tree)
+  dat$y <- -dat$y
   shape.size <- size
   text.size <- 8
-  .pt <- 72.27 / 25.4  # ggplot2 internal constant (points per mm)
-
-  # ---- Tree structure ----
+  .pt <- 72.27 / 25.4
   plt <- ggplot(dat, aes(x = x, y = y)) +
-    # Mating lines
-    geom_line(
-      data = dat[!is.na(dat$mate.id), ],
-      aes(group = floor(mate.id)),
-      colour = col.tree
-    )
-
-  # Double line for consanguineous matings
-  if (any(dat$kinship > 0 & !is.na(dat$mate.id))) {
-    consang <- dat[dat$mate.id %in% dat$mate.id[dat$kinship > 0] &
-                     !is.na(dat$mate.id), ]
-    plt <- plt + geom_line(
-      data = consang,
-      aes(group = mate.id, y = y + 0.02),
-      colour = col.tree
-    )
-    if (plot.kinship.label) {
-      consang_label <- consang[!is.na(consang$mate.centerpoint), ]
-      if (nrow(consang_label) > 0) {
-        plt <- plt + geom_text(
-          data = consang_label,
-          aes(label = paste0("Kinship:\n", as.character(kinship)),
-              x = mate.centerpoint),
-          vjust = shape.size / 2 / min(dat$y),
-          size = text.size / .pt
-        )
-      }
-    }
+    geom_segment(data = segments,
+      aes(x = x, y = y, xend = xend, yend = yend,
+          group = relationship_id, linetype = I(linetype), colour = I(colour)),
+      inherit.aes = FALSE)
+  if (plot.kinship.label && label.mode == "legacy") {
+    k <- model$partnerships[model$partnerships$kinship > 0, , drop = FALSE]
+    if (nrow(k)) plt <- plt + geom_text(data = k,
+      aes(x = x, y = -y + 0.08, label = paste0("Kinship: ", kinship)),
+      inherit.aes = FALSE, size = text.size / .pt, vjust = 0)
   }
-
-  # Repeated subjects
-  if (length(dat$Name) != length(unique(dat$Name))) {
-    if (!allow.repeated) {
-      cli::cli_abort("Drawing subjects multiple times is not supported. Set 'allow.repeated = TRUE'.")
-    }
-    plt <- plt + geom_line(
-      data = dat,
-      aes(group = ID, y = y - 0.02),
-      linetype = 2, colour = col.double
-    )
-  }
-
-  # Descending tree segments — use per-mating descent.target.x
-  desc_data <- dat[!is.na(dat$mate.id) & !is.na(dat$mate.centerpoint), ]
-  if (nrow(desc_data) > 0) {
-    plt <- plt +
-      geom_segment(
-        data = desc_data,
-        aes(group = mate.id, x = mate.centerpoint,
-            xend = mate.centerpoint, yend = y - 0.5),
-        colour = col.tree
-      ) +
-      geom_segment(
-        data = desc_data[!is.na(desc_data$descent.target.x), ],
-        aes(group = mate.id, x = mate.centerpoint,
-            xend = descent.target.x, y = y - 0.5, yend = y - 0.75),
-        colour = col.tree
-      )
-  }
-
-  # Children connections - twins
-  if (any(!is.na(dat$twin.id))) {
-    dat$xfambarcoord <- mapply(function(x_val, twin_cp, fam_cp) {
-      if (!is.na(twin_cp)) {
-        if (x_val >= fam_cp) max(x_val, twin_cp) else min(x_val, twin_cp)
-      } else {
-        x_val
-      }
-    }, dat$x, dat$twin.centerpoint, dat$family.centerpoint)
-
-    twin_fam_data <- dat[dat$family %in% dat$family[!is.na(dat$twin.id)], ]
-    if (nrow(twin_fam_data) > 0) {
-      plt <- plt + geom_line(
-        data = twin_fam_data,
-        aes(group = family, y = y + 0.25, x = xfambarcoord),
-        colour = col.tree
-      )
-    }
-
-    twin_data <- dat[dat$family %in% dat$family[!is.na(dat$twin.id)] &
-                       !is.na(dat$twin.id), ]
-    if (nrow(twin_data) > 0) {
-      plt <- plt + geom_segment(
-        data = twin_data,
-        aes(group = family, xend = twin.centerpoint, x = x, yend = y + 0.25),
-        colour = col.tree
-      )
-    }
-
-    twin_type_data <- dat[dat$family %in% dat$family[!is.na(dat$twin.id)] &
-                            !is.na(dat$twin.type), ]
-    if (nrow(twin_type_data) > 0) {
-      plt <- plt + geom_segment(
-        data = twin_type_data,
-        aes(group = twin.id, linetype = twin.type,
-            y = y + 0.125, yend = y + 0.125,
-            x = twin.centerpoint + 0.25, xend = twin.centerpoint - 0.25),
-        colour = col.tree
-      )
-    }
-  }
-
-  # Non-twin children
-  nontwin <- dat[!is.na(dat$family) & is.na(dat$twin.id), ]
-  if (nrow(nontwin) > 0) {
-    plt <- plt +
-      geom_line(data = nontwin, aes(group = family, y = y + 0.25, x = x),
-                colour = col.tree) +
-      geom_segment(data = nontwin,
-                   aes(group = family, xend = x, yend = y + 0.25),
-                   colour = col.tree)
-  }
-
   # ---- Individual symbols ----
   plt <- plt + geom_pedigreepoint(
     mapping = aes(
@@ -312,7 +204,7 @@ ggdraw.pedigree <- function(dat = NULL,
 
   # ---- Name labels ----
   voffset <- 0
-  if ("Name" %in% colnames(dat) && plot.names) {
+  if ("Name" %in% colnames(dat) && plot.names && label.mode == "legacy") {
     plt <- plt + geom_text(
       data = dat,
       aes(label = Name),
@@ -326,17 +218,36 @@ ggdraw.pedigree <- function(dat = NULL,
   # ---- Formatting ----
   plt <- plt +
     theme_void() +
-    theme(legend.position = "none")  # we build legends ourselves
+    theme(legend.position = "none") +
+    scale_x_continuous(expand = expansion(add = 0.5)) +
+    scale_y_continuous(expand = expansion(add = 0.5))
+  if (debug) {
+    plt <- plt + geom_text(aes(label = occurrence_id), colour = "#005a9c",
+      nudge_y = 0.14, size = 2) +
+      geom_point(data = model$partnerships, aes(x = x, y = -y),
+        inherit.aes = FALSE, colour = "red", shape = 4) +
+      geom_text(data = model$partnerships,
+        aes(x = x, y = -y + 0.25, label = relationship_id),
+        inherit.aes = FALSE, colour = "red", size = 2)
+  }
 
   # ---- Build result object with embedded legend specs ----
   result <- structure(
     list(
       plot     = plt,
       features = features,
-      dat      = dat
+      dat      = dat,
+      relationships = model,
+      connections = segments,
+      options = list(size = size, plot.names = plot.names, plot.kinship.label = plot.kinship.label,
+        label.mode = label.mode, label.control = label.control, label.overrides = label.overrides,
+        auto.size = auto.size, size.control = size.control),
+      diagnostics = new.env(parent = emptyenv())
     ),
     class = "ggped_plot"
   )
+  .validate_overrides(label.overrides, .label_requests(result))
+  result$recommended_dimensions <- .recommended_dimensions(result)
   result
 }
 
@@ -346,7 +257,8 @@ ggdraw.pedigree <- function(dat = NULL,
 
 #' Build all legend grobs for a ggped plot
 #' @keywords internal
-.build_all_legend_grobs <- function(features, dat) {
+#' @noRd
+.build_all_legend_grobs <- function(features, dat, max_width = Inf) {
   all_legends <- list()
 
   # Shape legend
@@ -356,29 +268,31 @@ ggdraw.pedigree <- function(dat = NULL,
     shape = factor(c("Male", "Female", "Unknown"),
                     levels = c("Male", "Female", "Unknown"))
   )
+  shape_rows <- if (max_width < 3) 3 else 1
   p_shape <- ggplot(shape_df, aes(x = x, y = y, shape = shape)) +
     geom_point(size = 3, fill = "white", colour = "black") +
     scale_shape_manual(
       values = c(Male = 22, Female = 21, Unknown = 23),
-      name   = "Sex"
+      name   = "Sex", guide = guide_legend(nrow = shape_rows, title.position = "top")
     ) +
     theme_void() +
     theme(legend.position = "bottom",
           legend.title = element_text(size = 9, face = "bold"),
           legend.text  = element_text(size = 8))
   g <- .extract_legend_safe(p_shape)
-  if (!is.null(g)) all_legends[["Sex"]] <- g
+  if (!is.null(g)) all_legends[["shape:Sex"]] <- .pad_legend(g)
 
   # Feature legends
   feat_names <- names(features)
   for (fn in feat_names) {
     scale <- features[[fn]]
     display_name <- if (!is.null(scale$name)) scale$name else fn
+    if (is.finite(max_width)) display_name <- .wrap_label(display_name, max(4, floor(max_width * 11)))
 
     if (inherits(scale, "scale_feature_continuous")) {
       vals <- as.numeric(dat[[fn]])
       lims <- scale$limits
-      if (is.null(lims)) lims <- range(vals, na.rm = TRUE)
+      if (is.null(lims)) lims <- .feature_limits(vals)
       if (lims[1] == lims[2]) lims <- lims + c(-0.5, 0.5)
       colours <- if (!is.null(scale$mid)) {
         c(scale$low, scale$mid, scale$high)
@@ -391,7 +305,7 @@ ggdraw.pedigree <- function(dat = NULL,
         scale_fill_gradientn(
           colours = colours, limits = lims, name = display_name,
           guide = guide_colorbar(
-            barwidth = grid::unit(3, "cm"),
+            barwidth = grid::unit(min(1.2, max_width * 0.7), "inches"),
             barheight = grid::unit(0.4, "cm"),
             title.position = "top"
           )
@@ -411,7 +325,8 @@ ggdraw.pedigree <- function(dat = NULL,
         geom_tile(colour = "black", linewidth = 0.3) +
         scale_fill_manual(
           values = scale$values, name = display_name,
-          guide = guide_legend(title.position = "top")
+          labels = vapply(lvls, .wrap_label, character(1), width = if (is.finite(max_width)) max(4, floor(max_width * 9)) else 40),
+          guide = guide_legend(title.position = "top", ncol = 1)
         ) +
         theme_void() +
         theme(legend.position = "bottom",
@@ -420,7 +335,7 @@ ggdraw.pedigree <- function(dat = NULL,
     }
 
     g <- .extract_legend_safe(p_leg)
-    if (!is.null(g)) all_legends[[fn]] <- g
+    if (!is.null(g)) all_legends[[paste0("feature:", fn)]] <- .pad_legend(g)
   }
 
   all_legends
@@ -428,40 +343,19 @@ ggdraw.pedigree <- function(dat = NULL,
 
 #' Safely extract legend grob from a ggplot
 #' @keywords internal
+#' @noRd
 .extract_legend_safe <- function(p) {
-  tryCatch({
     g <- ggplot2::ggplotGrob(p)
-    idx <- which(sapply(g$grobs, function(x) x$name) == "guide-box")
+    idx <- which(grepl("^guide-box", g$layout$name) & !vapply(g$grobs, inherits, logical(1), "zeroGrob"))
     if (length(idx) == 0) return(NULL)
     g$grobs[[idx[1]]]
-  }, error = function(e) NULL)
 }
 
-#' Arrange legend grobs into rows with automatic wrapping
-#' @param legend_grobs List of grob objects
-#' @param max_per_row Maximum legends per row (default 3)
-#' @return A gtable grob
-#' @keywords internal
-.arrange_legends_multirow <- function(legend_grobs, max_per_row = 3) {
-  n <- length(legend_grobs)
-  if (n == 0) return(grid::nullGrob())
-
-  n_rows <- ceiling(n / max_per_row)
-  row_height <- grid::unit(1.5, "cm")
-
-  # Build a gtable with n_rows rows
-  gt <- gtable::gtable(
-    widths  = rep(grid::unit(1, "null"), max_per_row),
-    heights = rep(row_height, n_rows)
-  )
-
-  for (i in seq_len(n)) {
-    r <- ceiling(i / max_per_row)
-    c <- ((i - 1) %% max_per_row) + 1
-    gt <- gtable::gtable_add_grob(gt, legend_grobs[[i]], t = r, l = c)
-  }
-
-  gt
+.pad_legend <- function(g) {
+  # Colourbar endpoint tick labels can extend beyond the bar's gtable width.
+  # Reserve their physical overhang before packing adjacent legends.
+  g <- gtable::gtable_add_cols(g, grid::unit(0.16, "inches"), pos = 0)
+  gtable::gtable_add_cols(g, grid::unit(0.16, "inches"), pos = -1)
 }
 
 # =========================================================================
@@ -471,44 +365,31 @@ ggdraw.pedigree <- function(dat = NULL,
 #' Draw a ggped_plot onto the current graphics device
 #' @param x A ggped_plot object
 #' @keywords internal
+#' @noRd
 .draw_ggped <- function(x) {
-  legend_grobs <- .build_all_legend_grobs(x$features, x$dat)
-  n_legends <- length(legend_grobs)
-
-  if (n_legends == 0) {
-    # No legends — just draw the plot
-    grid::grid.draw(ggplot2::ggplotGrob(x$plot))
-    return(invisible(NULL))
-  }
-
-  legend_table <- .arrange_legends_multirow(legend_grobs, max_per_row = 3)
-  n_legend_rows <- ceiling(n_legends / 3)
-  legend_height <- grid::unit(1.5 * n_legend_rows, "cm")
-
-  # Create a viewport layout: plot on top, legends on bottom
-  main_vp <- grid::viewport(
-    layout = grid::grid.layout(
-      nrow = 2, ncol = 1,
-      heights = grid::unit.c(grid::unit(1, "null"), legend_height)
-    )
-  )
-
-  grid::pushViewport(main_vp)
-
-  # Draw main plot
-  grid::pushViewport(grid::viewport(layout.pos.row = 1, layout.pos.col = 1))
-  grid::grid.draw(ggplot2::ggplotGrob(x$plot))
+  device <- grDevices::dev.size("in")
+  prepared <- .prepare_canvas(x, device[1], device[2])
+  x$diagnostics$labels <- prepared$labels
+  x$diagnostics$collisions <- prepared$collisions
+  x$diagnostics$device <- device
+  x$diagnostics$legend_overflow <- prepared$overflow
+  issues <- character()
+  if (nrow(prepared$collisions)) issues <- c(issues, paste0(nrow(prepared$collisions), " label(s) have unresolved placement constraints. Inspect plot$diagnostics$collisions."))
+  if (prepared$overflow) issues <- c(issues, "Legends exceed the available canvas; increase width or height.")
+  if (length(issues)) cli::cli_warn(paste(issues, collapse = " "))
+  main <- grid::viewport(layout = grid::grid.layout(4, 3,
+    widths = grid::unit(c(prepared$margin, prepared$plot_width, prepared$margin), "inches"),
+    heights = grid::unit(c(prepared$margin, prepared$plot_height, prepared$legends$height, prepared$margin), "inches")))
+  grid::pushViewport(main)
+  on.exit(grid::popViewport())
+  grid::pushViewport(grid::viewport(layout.pos.row = 2, layout.pos.col = 2))
+  grid::grid.draw(prepared$plot)
   grid::popViewport()
-
-  # Draw legends
-  grid::pushViewport(grid::viewport(layout.pos.row = 2, layout.pos.col = 1))
-  grid::grid.draw(legend_table)
+  grid::pushViewport(grid::viewport(layout.pos.row = 3, layout.pos.col = 2))
+  grid::grid.draw(prepared$legends$grob)
   grid::popViewport()
-
-  grid::popViewport()
-  invisible(NULL)
+  invisible(x)
 }
-
 # =========================================================================
 # Print and save methods
 # =========================================================================
@@ -539,35 +420,37 @@ plot.ggped_plot <- function(x, ...) {
 #' @param width Width in inches (default 10)
 #' @param height Height in inches (default 8)
 #' @param dpi Resolution for raster formats (default 150)
+#' @param auto.size Override the plot's automatic sizing option. NULL inherits it.
+#'   Explicit width and height always take precedence. Omitted dimensions use
+#'   automatic recommendations when enabled, or 10 by 8 inches otherwise.
+#' @return Invisibly, the output filename. See plot$diagnostics for placement
+#'   constraints and the dimensions actually used.
 #' @export
-save_ggped <- function(plot, filename, width = 10, height = 8, dpi = 150) {
+save_ggped <- function(plot, filename, width = NULL, height = NULL, dpi = 150,
+                       auto.size = NULL) {
+  .check_positive(dpi, "dpi")
+  if (!is.null(width)) .check_positive(width, "width")
+  if (!is.null(height)) .check_positive(height, "height")
   if (!inherits(plot, "ggped_plot")) {
-    # Fall back to ggsave for standard ggplot objects
-    ggplot2::ggsave(filename, plot, width = width, height = height, dpi = dpi)
+    ggplot2::ggsave(filename, plot, width = if (is.null(width)) 10 else width,
+      height = if (is.null(height)) 8 else height, dpi = dpi)
     return(invisible(filename))
   }
-
+  if (is.null(auto.size)) auto.size <- plot$options$auto.size
+  .check_flag(auto.size, "auto.size")
   ext <- tolower(tools::file_ext(filename))
-  if (ext %in% c("png", "")) {
-    if (ext == "") filename <- paste0(filename, ".png")
-    grDevices::png(filename, width = width, height = height,
-                   units = "in", res = dpi)
-  } else if (ext == "pdf") {
-    grDevices::pdf(filename, width = width, height = height)
-  } else if (ext == "svg") {
-    grDevices::svg(filename, width = width, height = height)
-  } else if (ext %in% c("tif", "tiff")) {
-    grDevices::tiff(filename, width = width, height = height,
-                    units = "in", res = dpi)
-  } else if (ext %in% c("jpg", "jpeg")) {
-    grDevices::jpeg(filename, width = width, height = height,
-                    units = "in", res = dpi)
-  } else {
-    grDevices::png(filename, width = width, height = height,
-                   units = "in", res = dpi)
-  }
-
-  on.exit(grDevices::dev.off(), add = TRUE)
+  if (ext == "") { filename <- paste0(filename, ".png"); ext <- "png" }
+  # Measure on the requested device type, including raster-specific font metrics.
+  probe <- tempfile(fileext = paste0(".", ext))
+  .open_ggped_device(probe, ext, 10, 8, dpi)
+  probe_device <- grDevices::dev.cur()
+  dims <- tryCatch(.choose_dimensions(plot, width, height, auto.size),
+    finally = { grDevices::dev.off(probe_device); unlink(probe) })
+  plot$diagnostics$export_dimensions <- dims[c("width", "height")]
+  plot$diagnostics$sizing_iterations <- unname(dims["iterations"])
+  .open_ggped_device(filename, ext, dims["width"], dims["height"], dpi)
+  device <- grDevices::dev.cur()
+  on.exit(grDevices::dev.off(device))
   grid::grid.newpage()
   .draw_ggped(plot)
   invisible(filename)

@@ -1,7 +1,7 @@
 Package: ggped
 Type: Package
 Title: Draw Pedigree Charts Using ggplot2 and kinship2
-Version: 2.0.0
+Version: 2.1.0
 Authors@R: c(
     person("Moritz", "Lindner", email = "moritz@lindnerlab.de",
            role = "aut",
@@ -25,8 +25,10 @@ Imports:
     grid,
     grDevices,
     kinship2,
-    tidyr,
     cli,
-    scales,
     gtable
-RoxygenNote: 7.3.2
+Suggests:
+    testthat (>= 3.0.0),
+    roxygen2
+Config/testthat/edition: 3
+RoxygenNote: 7.3.3

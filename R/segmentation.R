@@ -109,7 +109,9 @@ get_optimal_theta <- function(shape, n) {
 #' @export
 get_segment_polygons <- function(shape, n_segments, scale = 1, n_circle_pts = 80) {
   stopifnot(shape %in% c("circle", "square", "diamond"))
-  stopifnot(n_segments >= 1 && n_segments <= 4)
+  stopifnot(length(n_segments) == 1L, n_segments %in% 1:4)
+  .check_positive(scale, "scale")
+  stopifnot(length(n_circle_pts) == 1L, is.finite(n_circle_pts), n_circle_pts >= 4, n_circle_pts == as.integer(n_circle_pts))
 
   theta <- get_optimal_theta(shape, n_segments)
 
@@ -224,7 +226,10 @@ get_segment_polygons <- function(shape, n_segments, scale = 1, n_circle_pts = 80
 #' @return Shape name: "circle", "square", or "diamond"
 #' @keywords internal
 sex_to_shape <- function(sex_level) {
-  sl <- as.character(sex_level)
+  sl <- tolower(as.character(sex_level))
+  if (is.na(sl) || sl %in% c("0", "3", "4", "u", "unknown", "terminated")) return("diamond")
+  if (sl %in% c("1", "m", "male", "22")) return("square")
+  if (sl %in% c("2", "f", "female")) return("circle")
   if (sl %in% names(.SEX_SHAPE_MAP)) {
     return(.SEX_SHAPE_MAP[[sl]])
   }

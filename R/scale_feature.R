@@ -87,7 +87,7 @@ resolve_colours.scale_feature_continuous <- function(scale, x) {
   x_num <- as.numeric(x)
   lims <- scale$limits
   if (is.null(lims)) {
-    lims <- range(x_num, na.rm = TRUE)
+    lims <- .feature_limits(x_num)
   }
   if (lims[1] == lims[2]) {
     lims <- lims + c(-0.5, 0.5)
@@ -116,6 +116,12 @@ resolve_colours.scale_feature_continuous <- function(scale, x) {
   out <- pal[idx]
   out[is.na(x_num)] <- scale$na.value
   out
+}
+
+.feature_limits <- function(x) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(c(0, 1))
+  range(x)
 }
 
 #' @export

@@ -69,99 +69,45 @@ draw_panel = function(data, panel_scales, coord,
                       na.colour     = "#808080") {
 
   coords <- coord$transform(data, panel_scales)
-
+  if (!nrow(coords)) return(grid::nullGrob())
   n_seg <- as.integer(n_features)
-  grob_list <- grid::gList()
-
-  for (i in seq_len(nrow(coords))) {
-    row <- coords[i, ]
-    cx <- grid::unit(row$x, "npc")
-    cy <- grid::unit(row$y, "npc")
-
-    shape <- sex_to_shape(row$sex)
-    seg_polys <- get_segment_polygons(shape, n_seg, scale = 1)
-
-    # Retrieve fill colours for this individual
-    ind_id <- if ("individual_id" %in% names(row)) as.character(row$individual_id) else paste(row$x, row$y)
-    fills <- segment_fills[[ind_id]]
-    if (is.null(fills)) {
-      fills <- rep("#FFFFFF", n_seg)
-    }
-
-    # Draw each segment as a polygon
-    for (s in seq_len(n_seg)) {
-      poly_pts <- seg_polys[[s]]
-      n_pts <- nrow(poly_pts)
-
-      px <- cx + grid::unit(poly_pts[, 1] * size, "points")
-      py <- cy + grid::unit(poly_pts[, 2] * size, "points")
-
-      seg_grob <- grid::polygonGrob(
-        x  = px,
-        y  = py,
-        gp = grid::gpar(
-          fill = fills[s],
-          col  = row$colour,
-          alpha = row$alpha,
-          lwd  = row$stroke
-        )
-      )
-      grob_list <- grid::gList(grob_list, seg_grob)
-    }
-
-    # Overlay: deceased
-    if (!is.null(row$isdead) && as.character(row$isdead) %in% c("1", "TRUE")) {
-      # Diagonal slash through symbol
-      slash_size <- size * 1.3
-      grob_list <- grid::gList(grob_list,
-        grid::segmentsGrob(
-          x0 = cx - grid::unit(slash_size, "points"),
-          y0 = cy - grid::unit(slash_size, "points"),
-          x1 = cx + grid::unit(slash_size, "points"),
-          y1 = cy + grid::unit(slash_size, "points"),
-          gp = grid::gpar(col = row$colour, lwd = row$stroke * 1.5)
-        )
-      )
-    }
-
-    # Overlay: adopted (brackets)
-    if (!is.null(row$adopted) && isTRUE(as.logical(row$adopted))) {
-      grob_list <- grid::gList(grob_list,
-        grid::textGrob(
-          "[  ]",
-          x  = cx,
-          y  = cy,
-          vjust = 0.4,
-          gp = grid::gpar(
-            cex   = 1.5,
-            alpha = row$alpha,
-            col   = row$colour
-          )
-        )
-      )
-    }
-
-    # Overlay: pregnancy
-    if (!is.null(row$pregnancy) && isTRUE(as.logical(row$pregnancy))) {
-      grob_list <- grid::gList(grob_list,
-        grid::textGrob(
-          "P",
-          x  = cx,
-          y  = cy,
-          vjust = 0.5,
-          gp = grid::gpar(
-            cex   = 0.8,
-            alpha = row$alpha,
-            col   = row$colour
-          )
-        )
-      )
-    }
-  }
-
-  grob_list
+  shapes <- vapply(as.character(coords$sex), sex_to_shape, character(1))
+  templates <- setNames(lapply(unique(shapes), get_segment_polygons,
+    n_segments = n_seg, scale = 1), unique(shapes))
+  polygons <- unlist(unname(templates[shapes]), recursive = FALSE)
+  lengths <- vapply(polygons, nrow, integer(1))
+  vertices <- do.call(rbind, polygons) * size
+  owner <- rep(seq_len(nrow(coords)), each = n_seg)
+  fills <- unlist(lapply(seq_len(nrow(coords)), function(i) {
+    id <- if ("individual_id" %in% names(coords)) as.character(coords$individual_id[i]) else paste(coords$x[i], coords$y[i])
+    cols <- segment_fills[[id]]
+    if (is.null(cols)) rep("#FFFFFF", n_seg) else cols
+  }), use.names = FALSE)
+  if (length(fills) != length(lengths)) cli::cli_abort("Each segment_fills entry must contain n_features colours.")
+  # id.lengths keeps one polygon and colour per individual/feature while grid
+  # handles all vertices in one grob. Template reuse is local to this draw.
+  grobs <- list(grid::polygonGrob(
+    x = grid::unit(rep(coords$x[owner], lengths), "npc") + grid::unit(vertices[, 1], "points"),
+    y = grid::unit(rep(coords$y[owner], lengths), "npc") + grid::unit(vertices[, 2], "points"),
+    id.lengths = lengths,
+    gp = grid::gpar(fill = fills, col = coords$colour[owner], alpha = coords$alpha[owner], lwd = coords$stroke[owner])))
+  dead <- which(as.character(coords$isdead) %in% c("1", "TRUE"))
+  if (length(dead)) grobs[[length(grobs) + 1L]] <- grid::segmentsGrob(
+    x0 = grid::unit(coords$x[dead], "npc") - grid::unit(size * 1.3, "points"),
+    y0 = grid::unit(coords$y[dead], "npc") - grid::unit(size * 1.3, "points"),
+    x1 = grid::unit(coords$x[dead], "npc") + grid::unit(size * 1.3, "points"),
+    y1 = grid::unit(coords$y[dead], "npc") + grid::unit(size * 1.3, "points"),
+    gp = grid::gpar(col = coords$colour[dead], lwd = coords$stroke[dead] * 1.5))
+  adopted <- which(as.logical(coords$adopted))
+  if (length(adopted)) grobs[[length(grobs) + 1L]] <- grid::textGrob("[  ]",
+    x = grid::unit(coords$x[adopted], "npc"), y = grid::unit(coords$y[adopted], "npc"), vjust = 0.4,
+    gp = grid::gpar(cex = 1.5, alpha = coords$alpha[adopted], col = coords$colour[adopted]))
+  pregnancy <- which(as.logical(coords$pregnancy))
+  if (length(pregnancy)) grobs[[length(grobs) + 1L]] <- grid::textGrob("P",
+    x = grid::unit(coords$x[pregnancy], "npc"), y = grid::unit(coords$y[pregnancy], "npc"), vjust = 0.5,
+    gp = grid::gpar(cex = 0.8, alpha = coords$alpha[pregnancy], col = coords$colour[pregnancy]))
+  grid::gTree(children = do.call(grid::gList, grobs))
 },
-
 draw_key = function(data, params, size) {
   grid::pointsGrob(
     0.5, 0.5,
@@ -194,6 +140,9 @@ geom_pedigreepoint <- function(data = NULL,
                                n_features = 1L,
                                show.legend = NA,
                                inherit.aes = TRUE) {
+  .check_positive(size, "size")
+  if (length(n_features) != 1L || !is.numeric(n_features) || is.na(n_features) || !n_features %in% 1:4)
+    cli::cli_abort("'n_features' must be an integer from 1 to 4.")
   ggplot2::layer(
     data        = data,
     mapping     = mapping,
